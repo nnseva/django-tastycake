@@ -101,7 +101,7 @@ will return something like
         "previous": null,
         "total_count": 3
     }
-    "objects":[
+    "objects": [
         1,2,3
     ]
 ```
