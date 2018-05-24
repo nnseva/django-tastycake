@@ -100,7 +100,7 @@ will return something like
         "offset": 0,
         "previous": null,
         "total_count": 3
-    }
+    },
     "objects": [
         1,2,3
     ]
