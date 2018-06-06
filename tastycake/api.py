@@ -32,6 +32,7 @@ from tastypie.serializers import Serializer
 from tastypie.utils.mime import determine_format, build_content_type
 from tastypie.utils import is_valid_jsonp_callback_value, string_to_python, trailing_slash
 from tastypie.api import Api as TastypieApi
+from tastypie.http import HttpNoContent
 from tastypie.resources import Resource, ModelResource
 from tastypie.constants import ALL,ALL_WITH_RELATIONS
 
@@ -680,7 +681,13 @@ class CakeModelResource(BaseApiMixin, ModelResource):
                 else:
                     # WTF?
                     raise Exception("WTF?")
-                schema['relations'][n]['url'] = "%s%s/%s/" % (list_endpoint, '<ID>', n)
+                schema['relations'][n]['urls'] = {}
+                if isinstance(field, (ForeignKey, OneToOneRel, OneToOneField)):
+                    schema['relations'][n]['urls']['set'] = "%s%s/%s/set/" % (list_endpoint, '<ID>', n)
+                elif isinstance(field, (ManyToManyRel, ManyToOneRel, ManyToManyField)):
+                    schema['relations'][n]['urls']['add'] = "%s%s/%s/add/" % (list_endpoint, '<ID>', n)
+                    schema['relations'][n]['urls']['remove'] = "%s%s/%s/remove/" % (list_endpoint, '<ID>', n)
+                schema['relations'][n]['urls']['get'] = "%s%s/%s/" % (list_endpoint, '<ID>', n)
         return schema
 
     def prepend_urls(self):
@@ -690,6 +697,10 @@ class CakeModelResource(BaseApiMixin, ModelResource):
             url(
                 r"^(?P<resource_name>%s)/(?P<method>[^0-9][^/]*)/?$" % (self._meta.resource_name),
                 self.wrap_view('dispatch_classmethod'), name="api_dispatch_classmethod"
+            ),
+            url(
+                r"^(?P<resource_name>%s)/(?P<%s>.*?)/(?P<relation>[^/]+)/(?P<method>[^/]+)/?$" % (self._meta.resource_name, self._meta.detail_uri_name),
+                self.wrap_view('dispatch_relation_method'), name="api_dispatch_relation_method"
             ),
             url(
                 r"^(?P<resource_name>%s)/(?P<%s>.*?)/(?P<method>[^/]+)/?$" % (self._meta.resource_name, self._meta.detail_uri_name),
@@ -747,6 +758,8 @@ class CakeModelResource(BaseApiMixin, ModelResource):
             raise NotFound("No such object %s%s/" % (self.get_list_endpoint(),id))
 
         resource = self.get_resource_for_reference(relation)
+        if not resource:
+            raise BadRequest("The resource is not allowed for this relation: %s" % relation)
 
         if isinstance(field, (ForeignKey, OneToOneRel, OneToOneField)):
             try:
@@ -762,6 +775,111 @@ class CakeModelResource(BaseApiMixin, ModelResource):
             resource.redirect_to_filter(request, {field.remote_field.name:obj.pk})
         else:
             raise Exception("WTF?")
+
+    def dispatch_relation_method(self, request, relation=None, method=None, **kwargs):
+        # check the request method
+        if not request.method.lower() == 'post':
+            raise BadRequest("Only POST request for relation methods: %s" % relation)
+
+        # check the relation presence
+        from django.core.exceptions import FieldDoesNotExist
+        try:
+            field = self._meta.object_class._meta.get_field(relation)
+        except FieldDoesNotExist, ex:
+            raise BadRequest("No such relation: %s" % relation)
+
+        # check the object presence and get an object
+        id = kwargs.get(self._meta.detail_uri_name)
+        if id.isdigit():
+            id = int(id)
+
+        basic_bundle = self.build_bundle(request=request)
+        try:
+            obj = self.cached_obj_get(bundle=basic_bundle, **self.remove_api_resource_names(kwargs))
+        except Exception, ex:
+            raise NotFound("No such object %s%s/" % (self.get_list_endpoint(),id))
+
+        # check the relation method presence
+        if isinstance(field, (ForeignKey, OneToOneRel, OneToOneField)):
+            if not method == 'set':
+                raise BadRequest("Only 'set' method allowed for this relation: %s" % relation)
+        elif isinstance(field, (ManyToManyRel, ManyToOneRel, ManyToManyField)):
+            if not method in ('add', 'remove'):
+                raise BadRequest("Only 'add' and 'remove' methods allowed for this relation: %s" % relation)
+
+        resource = self.get_resource_for_reference(relation)
+        if not resource:
+            raise BadRequest("The resource is not allowed for this relation: %s" % relation)
+
+        try:
+            arg = self.deserialize(request, request.body)
+        except Exception, ex:
+            raise BadRequest("Arguments deserialization error: %s" % ex)
+
+        # check rights
+        if isinstance(field, (ForeignKey, OneToOneField, ManyToManyField)):
+            # For the original fields the update should be allowed
+            basic_bundle.obj = obj
+            if not self.authorized_update_detail(self.get_object_list(basic_bundle.request), basic_bundle):
+                raise Unauthorized("Update not allowed while changing a relation: %s" % relation)
+        elif isinstance(field, OneToOneRel):
+            # For the foreign object the update should be allowed for the both, current and future objects
+            foreign_bundle = resource.build_bundle(request=request)
+            foreign_obj = None
+            try:
+                foreign_obj = getattr(obj, field.get_accessor_name())
+            except Exception, ex:
+                pass
+            if foreign_obj:
+                foreign_bundle.obj = foreign_obj
+                if not resource.authorized_update_detail(resource.get_object_list(foreign_bundle.request), foreign_bundle):
+                    raise Unauthorized("Update not allowed while changing a relation: %s" % relation)
+            # Future object
+            if arg:
+                try:
+                    foreign_obj = resource.cached_obj_get(bundle=foreign_bundle, **{
+                        'resource_name': resource._meta.resource_name,
+                        resource._meta.detail_uri_name: str(arg),
+                    })
+                except Exception, ex:
+                    raise NotFound("No such object %s%s/" % (resource.get_list_endpoint(),id))
+                if not resource.authorized_update_detail(resource.get_object_list(foreign_bundle.request), foreign_bundle):
+                    raise Unauthorized("Update not allowed while changing a relation: %s" % relation)
+        elif isinstance(field, (ManyToOneRel, ManyToManyRel)):
+            # For the set of foreign objects the update should be allowed for all these objects for the both, add and del, requests
+            foreign_bundle = resource.build_bundle(request=request)
+            for pk in arg:
+                try:
+                    foreign_obj = resource.cached_obj_get(bundle=foreign_bundle, **{
+                        'resource_name': resource._meta.resource_name,
+                        resource._meta.detail_uri_name: str(pk),
+                    })
+                except Exception, ex:
+                    raise NotFound("No such object %s%s/" % (resource.get_list_endpoint(),id))
+                if not resource.authorized_update_detail(resource.get_object_list(foreign_bundle.request), foreign_bundle):
+                    raise Unauthorized("Update not allowed while changing a relation: %s" % relation)
+
+        # updating relation
+        if isinstance(field, (ForeignKey, OneToOneField)):
+            setattr(obj, field.get_attname(), arg)
+            self.save(basic_bundle)
+        elif isinstance(field, (ManyToManyField, ManyToManyRel, ManyToOneRel)):
+            foreign_bundle = resource.build_bundle(request=request)
+            mthd = getattr(getattr(obj, field.get_accessor_name()), method, None)
+            if not mthd:
+                raise BadRequest("The method '%s' not found for this relation: %s" % (method, relation))
+            foreign_objects = []
+            for pk in arg:
+                try:
+                    foreign_obj = resource.cached_obj_get(bundle=foreign_bundle, **{
+                        'resource_name': resource._meta.resource_name,
+                        resource._meta.detail_uri_name: str(pk),
+                    })
+                except Exception, ex:
+                    raise NotFound("No such object %s%s/" % (resource.get_list_endpoint(),id))
+                foreign_objects.append(foreign_obj)
+            mthd(*foreign_objects)
+        return HttpNoContent()
 
     def persistent_redirect_parameter_names(self):
         return ('format',)
