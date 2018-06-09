@@ -186,6 +186,11 @@ class Api(BaseApi):
         elif hasattr(settings, settings_name):
             self.settings = getattr(settings, settings_name)
 
+        if isinstance(self.settings, basestring):
+            module, name = self.settings.rsplit('.',1)
+            module = import_module(module)
+            self.settings = getattr(module, name)
+
         self.version_resources = {}
 
         for v in self.settings:
@@ -303,7 +308,7 @@ class ApplicationApi(BaseApi):
 
     def prepend_urls(self):
         return [
-            url('(?P<application>%s)/?$' % self.application, self.get_schema_view, name='get_application_schema')
+            url('^(?P<application>%s)/?$' % self.application, self.get_schema_view, name='get_application_schema')
         ]
 
     def build_schema(self, details=False):
@@ -643,6 +648,15 @@ class CakeModelResource(BaseApiMixin, ModelResource):
         if self._meta.object_class.__doc__:
             schema['description'] = self._meta.object_class.__doc__
 
+        for field_name in schema['fields']:
+            model_field = self._meta.object_class._meta.get_field(field_name)
+            settings = self.settings.get('fields',{}).get(field_name,{})
+            choices = settings.get('choices',model_field.choices)
+            if choices:
+                schema['fields'][field_name]['choices'] = dict(choices)
+            schema['fields'][field_name]['help_text'] = settings.get('help_text',model_field.help_text)
+            schema['fields'][field_name]['verbose_name'] = settings.get('verbose_name',model_field.verbose_name)
+
         relations = [n for n in self.get_one_relations() + self.get_many_relations() if not n in self.settings.get('exclude',{})]
         if relations:
             schema['relations'] = {}
@@ -664,6 +678,7 @@ class CakeModelResource(BaseApiMixin, ModelResource):
                         'unique': field.unique,
                         'verbose_name': settings.get('verbose_name',field.verbose_name),
                         'many': isinstance(field, ManyToManyField),
+                        'related': resource_list_endpoint,
                         'original': True,
                     }
                 elif isinstance(field, ForeignObjectRel):
@@ -676,6 +691,7 @@ class CakeModelResource(BaseApiMixin, ModelResource):
                             else field.related_model._meta.verbose_name
                         ),
                         'many': isinstance(field, (ManyToManyRel, ManyToOneRel)),
+                        'related': resource_list_endpoint,
                         'original': False,
                     }
                 else:
@@ -693,7 +709,7 @@ class CakeModelResource(BaseApiMixin, ModelResource):
     def prepend_urls(self):
         urls = super(CakeModelResource,self).prepend_urls()
         urls += [
-            url(r"^(?P<resource_name>%s)/schema/?$" % (self._meta.resource_name), self.wrap_view('get_schema'), name="api_get_schema"),
+            url(r"^(?P<resource_name>%s)/schema(?:/?)$" % (self._meta.resource_name), self.wrap_view('get_schema'), name="api_get_schema"),
             url(
                 r"^(?P<resource_name>%s)/(?P<method>[^0-9][^/]*)/?$" % (self._meta.resource_name),
                 self.wrap_view('dispatch_classmethod'), name="api_dispatch_classmethod"
