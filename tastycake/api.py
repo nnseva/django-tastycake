@@ -77,6 +77,8 @@ class BaseApiMixin:
 
     @staticmethod
     def _import_function(function_ref):
+        if callable(function_ref):
+            return function_ref
         function_path = function_ref.rsplit('.',1)
         if len(function_path) < 2:
             raise TastycakeError("Bad function reference: %s" % function_ref)
@@ -379,6 +381,7 @@ class ApplicationApi(BaseApi):
                 include_resource_uri = False
                 authentication = self.get_authentication(model_class)
                 authorization = self.get_authorization(model_class)
+                max_limit = 0
 
         return ModelApi(self, self.version, self.application, model_class, model_settings)
 
@@ -705,6 +708,20 @@ class CakeModelResource(BaseApiMixin, ModelResource):
                     schema['relations'][n]['urls']['remove'] = "%s%s/%s/remove/" % (list_endpoint, '<ID>', n)
                 schema['relations'][n]['urls']['get'] = "%s%s/%s/" % (list_endpoint, '<ID>', n)
         return schema
+
+    def hydrate(self, bundle):
+        method_ref = self.settings.get('hydrate', None)
+        if method_ref:
+            method_callable = self._import_function(method_ref)
+            bundle = method_callable(self, bundle)
+        return bundle
+
+    def dehydrate(self, bundle):
+        method_ref = self.settings.get('dehydrate', None)
+        if method_ref:
+            method_callable = self._import_function(method_ref)
+            bundle = method_callable(self, bundle)
+        return bundle
 
     def prepend_urls(self):
         urls = super(CakeModelResource,self).prepend_urls()
