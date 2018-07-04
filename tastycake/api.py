@@ -28,7 +28,7 @@ from tastypie.exceptions import (
     ImmediateHttpResponse,
 )
 
-from tastypie.serializers import Serializer
+from tastypie.serializers import Serializer as _Serializer
 from tastypie.utils.mime import determine_format, build_content_type
 from tastypie.utils import is_valid_jsonp_callback_value, string_to_python, trailing_slash
 from tastypie.api import Api as TastypieApi
@@ -47,6 +47,9 @@ import sys
 import copy
 import json
 
+import datetime
+from django.utils import timezone
+
 from urllib import urlencode
 
 from importlib import import_module
@@ -56,6 +59,21 @@ logger = logging.getLogger(__name__)
 
 class TastycakeError(TastypieError):
     pass
+
+class Serializer(_Serializer):
+    def format_datetime(self, value):
+        from tastypie.utils import format_datetime
+        if self.datetime_formatting == 'rfc-2822':
+            return format_datetime(value)
+        if self.datetime_formatting == 'iso-8601-strict':
+            # Remove microseconds to strictly adhere to iso-8601
+            value = value - datetime.timedelta(microseconds=value.microsecond)
+        tz = getattr(settings,"TASTYCAKE_USE_TZ", None)
+        if tz:
+            if isinstance(tz,basestring):
+                tz = timezone.pytz.timezone(tz)
+            value = timezone.make_naive(timezone.localtime(value,tz))
+        return value.isoformat()
 
 class BaseApiMixin:
     @staticmethod
@@ -181,7 +199,7 @@ class BaseApi(BaseApiMixin, object):
 
 class Api(BaseApi):
     def __init__(self, settings_local=None, settings_name='TASTYCAKE', serializer_class=Serializer):
-        super(Api,self).__init__(serializer_class=Serializer)
+        super(Api,self).__init__(serializer_class=serializer_class)
         self.settings = {'v1':{}}
         if settings_local:
             self.settings = settings_local
@@ -373,6 +391,7 @@ class ApplicationApi(BaseApi):
 
         class ModelApi(ModelResource):
             class Meta:
+                serializer = self.serializer
                 object_class = model_class
                 queryset = object_class.objects.all()
                 resource_name = "%s/%s" % (self.application, model_class._meta.model_name)
@@ -484,8 +503,10 @@ class CakeModelResource(BaseApiMixin, ModelResource):
         return r
 
     def alter_list_data_to_serialize(self, request, to_be_serialized):
-        # Flattening returned list
-        to_be_serialized[self._meta.collection_name] = [v for m in to_be_serialized[self._meta.collection_name] for v in m.data.values()]
+        ## Flattening returned list
+        #to_be_serialized[self._meta.collection_name] = [v for m in to_be_serialized[self._meta.collection_name] for v in m.data.values()]
+        # Always use only primary key
+        to_be_serialized[self._meta.collection_name] = [m.data[self._meta.object_class._meta.pk.name] for m in to_be_serialized[self._meta.collection_name]]
         return to_be_serialized
 
     IGNORE_KEY_PREFIX = '-'
