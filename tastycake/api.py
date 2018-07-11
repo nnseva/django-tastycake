@@ -385,9 +385,8 @@ class ApplicationApi(BaseApi):
         return self.create_model_api(model_class)
 
     def create_model_api(self, model_class):
-        ModelResource = self.get_model_resource_class()
         model_settings = self.get_model_settings(model_class._meta.model_name)
-        #class ModelApi(ModelResource):
+        ModelResource = self.get_model_resource_class(model_class, model_settings)
 
         class ModelApi(ModelResource):
             class Meta:
@@ -404,8 +403,12 @@ class ApplicationApi(BaseApi):
 
         return ModelApi(self, self.version, self.application, model_class, model_settings)
 
-    def get_model_resource_class(self):
-        return CakeModelResource
+    def get_model_resource_class(self, model_class, model_settings):
+        class ModelResource(CakeModelResource):
+            _class = model_class
+            _settings = model_settings
+            _application = self
+        return ModelResource
 
     def get_authentication(self, model):
         model_settings = self.get_model_settings(model._meta.model_name)
@@ -444,6 +447,20 @@ class CakeModelResource(BaseApiMixin, ModelResource):
         if not cls._meta.object_class:
             return final_fields
 
+        version_settings = cls._application.version_api.settings or {}
+        app_settings = cls._application.settings or {}
+        cls_settings = cls._settings or {}
+        fields_settings = cls_settings.get('fields',{})
+        field_class_fn = cls_settings.get('api_field_from_django_field',
+            app_settings.get('api_field_from_django_field',
+                version_settings.get('api_field_from_django_field',
+                    cls.api_field_from_django_field
+                )
+            )
+        )
+        if isinstance(field_class_fn,basestring):
+            field_class_fn = cls._import_function(field_class_fn)
+
         for f in cls._meta.object_class._meta.fields:
             # If the field name is already present, skip
             if f.name in cls.base_fields:
@@ -460,12 +477,20 @@ class CakeModelResource(BaseApiMixin, ModelResource):
             if cls.should_skip_field(f):
                 continue
 
-            api_field_class = cls.api_field_from_django_field(f)
+            field_settings = fields_settings.get(f.name,{})
+            if 'field' in field_settings:
+                final_fields[f.name] = field_settings['field']
+                final_fields[f.name].instance_name = f.name
+                continue
+
+            api_field_class = field_settings.get('class', field_class_fn(f))
+            if isinstance(api_field_class, basestring):
+                api_field_class = cls._import_function(api_field_class)
 
             kwargs = {
                 'attribute': f.name,
-                'help_text': f.help_text,
-                'verbose_name': f.verbose_name,
+                'help_text': field_settings.get('help_text', f.help_text),
+                'verbose_name': field_settings.get('verbose_name', f.verbose_name),
             }
 
             kwargs['use_in'] = 'list' if f.primary_key else 'detail'
@@ -490,6 +515,9 @@ class CakeModelResource(BaseApiMixin, ModelResource):
 
             if getattr(f, 'auto_now_add', False):
                 kwargs['default'] = f.auto_now_add
+
+            if not getattr(f, 'editable', True):
+                kwargs['readonly'] = True
 
             final_fields[f.name] = api_field_class(**kwargs)
             final_fields[f.name].instance_name = f.name
@@ -680,6 +708,13 @@ class CakeModelResource(BaseApiMixin, ModelResource):
                 schema['fields'][field_name]['choices'] = dict(choices)
             schema['fields'][field_name]['help_text'] = settings.get('help_text',model_field.help_text)
             schema['fields'][field_name]['verbose_name'] = settings.get('verbose_name',model_field.verbose_name)
+
+        for field_name in self.settings.get('fields',{}):
+            if not field_name in schema['fields']:
+                schema['fields'][field_name] = {}
+                schema['fields'][field_name].update(self.settings['fields'][field_name])
+            else: # TODO!!!
+                pass
 
         relations = [n for n in self.get_one_relations() + self.get_many_relations() if not n in self.settings.get('exclude',{})]
         if relations:
